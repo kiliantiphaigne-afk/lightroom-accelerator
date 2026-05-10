@@ -5,3 +5,5 @@ dist/
 build/
 *.spec
 .env
+config.json
+feedback_data.json

@@ -12,10 +12,11 @@ Workflow :
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 import queue
 import time
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -28,6 +29,11 @@ from core.burst_detector import group_bursts, detect_duplicates
 from core.corrections import build_corrections, harmonize_white_balance
 from core.auto_crop import auto_crop
 from core.xmp_writer import write_xmp, write_report, generate_keywords
+from core.feedback import (
+    collect_feedback, save_feedback, load_learned, apply_learned_adjustments
+)
+
+CONFIG_FILE = Path("config.json")
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +54,30 @@ YELLOW      = "#f9e2af"
 PURPLE      = "#cba6f7"
 
 SUPPORTED_EXTS = RAW_EXTENSIONS | JPEG_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# Config (cle API persistante)
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def save_config(cfg: dict):
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+def get_api_key() -> Optional[str]:
+    return load_config().get("anthropic_api_key")
+
+def set_api_key(key: str):
+    cfg = load_config()
+    cfg["anthropic_api_key"] = key
+    save_config(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +119,7 @@ class SettingsPanel(tk.LabelFrame):
         self.enable_duplicates  = tk.BooleanVar(value=True)
         self.auto_corrections   = tk.BooleanVar(value=True)
         self.auto_crop          = tk.BooleanVar(value=True)
+        self.ai_rating          = tk.BooleanVar(value=False)
         self.color_labels       = tk.BooleanVar(value=True)
         self.generate_report    = tk.BooleanVar(value=True)
         self.max_workers        = tk.IntVar(value=4)
@@ -173,6 +204,7 @@ class SettingsPanel(tk.LabelFrame):
         chk("Détecter les doublons (hash perceptuel)", self.enable_duplicates, FG_MAIN)
         chk("Appliquer corrections auto (exposition, couleur)", self.auto_corrections, GREEN)
         chk("Recadrage automatique (visages + horizon)", self.auto_crop, GREEN)
+        chk("Tri IA — Claude Vision (plus précis, ~10€/3000 photos)", self.ai_rating, ACCENT)
         chk("Labels couleur par contexte (vert/bleu/violet...)", self.color_labels, FG_MAIN)
         chk("Générer rapport CSV", self.generate_report, FG_MAIN)
 
@@ -359,6 +391,23 @@ class App(tk.Tk):
         )
         self._stop_btn.pack(side="left", padx=(8, 0))
 
+        # Bouton feedback
+        btn_frame2 = tk.Frame(left, bg=BG_DARK)
+        btn_frame2.pack(fill="x")
+
+        self._feedback_btn = tk.Button(
+            btn_frame2, text="📊  Collecter feedback Lightroom",
+            command=self._collect_feedback,
+            bg=BG_PANEL, fg=PURPLE, activebackground=BG_INPUT, activeforeground=PURPLE,
+            font=("Segoe UI", 10), relief="flat", padx=10, pady=6, cursor="hand2"
+        )
+        self._feedback_btn.pack(fill="x")
+
+        tk.Label(
+            left, text="↑ Après avoir corrigé les notes dans Lightroom",
+            fg=FG_DIM, bg=BG_DARK, font=("Segoe UI", 8)
+        ).pack(anchor="w", pady=(2, 0))
+
         # Colonne droite : resultats + log
         right = tk.Frame(body, bg=BG_DARK)
         right.pack(side="left", fill="both", expand=True)
@@ -394,6 +443,61 @@ class App(tk.Tk):
         if folder:
             self._folder_var.set(folder)
 
+    def _collect_feedback(self):
+        """Lit les XMP apres edition Lightroom et apprend des corrections."""
+        folder_str = self._folder_var.get().strip()
+        if not folder_str:
+            messagebox.showwarning("Dossier manquant", "Choisissez le dossier que vous avez analysé.")
+            return
+
+        folder = Path(folder_str)
+        if not folder.exists():
+            messagebox.showerror("Erreur", f"Dossier introuvable : {folder_str}")
+            return
+
+        self._log.log("Collecte du feedback Lightroom…", "ok")
+
+        # Relancer une analyse rapide pour avoir les features
+        def do_feedback():
+            try:
+                # Scanner les photos
+                all_files = [
+                    f for f in (folder.rglob("*") if self._recursive_var.get() else folder.iterdir())
+                    if f.suffix.lower() in SUPPORTED_EXTS
+                ]
+
+                photos = []
+                for f in all_files:
+                    p = analyze_photo(f, enable_faces=False)
+                    if p is not None:
+                        photos.append(p)
+
+                feedback = collect_feedback(photos, folder)
+                fb_path = save_feedback(feedback, folder)
+
+                stats = feedback["stats"]
+                self._queue.put(("log", (
+                    f"Feedback collecté : {feedback['changed']} correction(s) détectée(s)", "ok"
+                )))
+                self._queue.put(("log", (
+                    f"  ↑ {stats['promoted']} promue(s)  ↓ {stats['demoted']} rétrogradée(s)  = {stats['unchanged']} inchangée(s)", "dim"
+                )))
+
+                learned = load_learned()
+                if "tendency" in learned:
+                    self._queue.put(("log", (f"  → {learned['tendency']}", "ok")))
+                if "blur_threshold_suggested" in learned:
+                    self._queue.put(("log", (
+                        f"  → Seuil de flou suggéré : {learned['blur_threshold_suggested']}", "ok"
+                    )))
+
+                self._queue.put(("log", (f"Données sauvegardées dans {fb_path.name}", "dim")))
+
+            except Exception as e:
+                self._queue.put(("log", (f"Erreur feedback : {e}", "error")))
+
+        threading.Thread(target=do_feedback, daemon=True).start()
+
     def _start(self):
         folder_str = self._folder_var.get().strip()
         if not folder_str:
@@ -404,6 +508,25 @@ class App(tk.Tk):
         if not folder.exists() or not folder.is_dir():
             messagebox.showerror("Erreur", f"Dossier introuvable : {folder_str}")
             return
+
+        # Verifier cle API si mode IA
+        if self._settings.ai_rating.get():
+            key = get_api_key()
+            if not key:
+                key = simpledialog.askstring(
+                    "Clé API Anthropic",
+                    "Entrez votre clé API Anthropic (sk-ant-...) :\n\n"
+                    "Créez-en une sur console.anthropic.com → API Keys",
+                    parent=self,
+                )
+                if key and key.startswith("sk-ant-"):
+                    set_api_key(key)
+                else:
+                    messagebox.showwarning(
+                        "Clé invalide",
+                        "La clé doit commencer par sk-ant-. Tri IA désactivé."
+                    )
+                    self._settings.ai_rating.set(False)
 
         self._log.clear()
         self._results.reset()
@@ -423,6 +546,7 @@ class App(tk.Tk):
             "enable_duplicates": self._settings.enable_duplicates.get(),
             "auto_corrections": self._settings.auto_corrections.get(),
             "auto_crop": self._settings.auto_crop.get(),
+            "ai_rating": self._settings.ai_rating.get(),
             "color_labels": self._settings.color_labels.get(),
             "generate_report": self._settings.generate_report.get(),
             "max_workers": self._settings.max_workers.get(),
@@ -549,15 +673,53 @@ class App(tk.Tk):
                 log(f"{n_dupes} doublon(s) supprimé(s).", "ok")
                 results(dupes=n_dupes)
 
-            # 5. Application du seuil de flou (post-analyse)
-            blur_thresh = params["blur_threshold"]
-            n_blur_rejected = 0
-            for p in analyzed:
-                if p.rating != -1 and p.blur_score < blur_thresh:
-                    p.rating = -1
-                    n_blur_rejected += 1
-            if n_blur_rejected:
-                log(f"{n_blur_rejected} photo(s) rejetée(s) pour flou (seuil={blur_thresh}).", "warn")
+            # 5. Application du seuil de flou (sauf si mode IA)
+            if not params["ai_rating"]:
+                blur_thresh = params["blur_threshold"]
+                n_blur_rejected = 0
+                for p in analyzed:
+                    if p.rating != -1 and p.blur_score < blur_thresh:
+                        p.rating = -1
+                        n_blur_rejected += 1
+                if n_blur_rejected:
+                    log(f"{n_blur_rejected} photo(s) rejetée(s) pour flou (seuil={blur_thresh}).", "warn")
+
+            # 5b. Appliquer les preferences apprises (feedback precedent)
+            learned = load_learned()
+            if learned:
+                n_adj = apply_learned_adjustments(analyzed, learned)
+                if n_adj:
+                    log(f"Preferences apprises appliquées : {n_adj} photo(s) ajustée(s).", "ok")
+                    tendency = learned.get("tendency", "")
+                    if tendency:
+                        log(f"  → {tendency}", "dim")
+
+            # 5c. Tri IA (Claude Vision) — remplace les notes heuristiques
+            if params["ai_rating"]:
+                api_key = get_api_key()
+                if not api_key:
+                    log("Clé API Anthropic manquante. Tri IA désactivé.", "error")
+                else:
+                    try:
+                        from core.ai_rater import AIRater, apply_ai_ratings
+                        log("Tri IA en cours (Claude Vision)… Cela peut prendre quelques minutes.", "ok")
+                        progress(65, "Tri IA en cours…")
+
+                        rater = AIRater(api_key=api_key)
+
+                        def ai_callback(done, total_ai, name):
+                            pct = 65 + (done / total_ai) * 15
+                            progress(pct, f"IA {done}/{total_ai} — {name}")
+                            log(f"  IA : {done}/{total_ai} traitées", "dim")
+
+                        ai_ratings = rater.rate_batch(analyzed, callback=ai_callback)
+                        apply_ai_ratings(analyzed, ai_ratings)
+
+                        n_ai_rejects = sum(1 for p in analyzed if p.rating == -1)
+                        n_ai_picks = sum(1 for p in analyzed if p.rating >= 1)
+                        log(f"Tri IA terminé : {n_ai_picks} sélectionnées / {n_ai_rejects} rejetées.", "ok")
+                    except Exception as e:
+                        log(f"Erreur tri IA : {e}. Fallback sur les notes heuristiques.", "error")
 
             # 6. Recadrage auto (chargement image necessaire)
             n_cropped = 0
