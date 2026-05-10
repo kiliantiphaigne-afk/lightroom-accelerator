@@ -223,29 +223,42 @@ def detect_faces(img_bgr: np.ndarray) -> tuple[int, bool]:
     """
     Detection de visages et d'yeux ouverts.
     Retourne (nb_visages, yeux_ouverts).
+    Protege contre les crashes OpenCV sur certains RAW.
     """
-    face_cascade, eye_cascade = _get_cascades()
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    gray_eq = cv2.equalizeHist(gray)
+    try:
+        face_cascade, eye_cascade = _get_cascades()
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-    faces = face_cascade.detectMultiScale(
-        gray_eq, scaleFactor=1.1, minNeighbors=5,
-        minSize=(40, 40), flags=cv2.CASCADE_SCALE_IMAGE
-    )
+        # Resize pour eviter les crashes OpenCV sur les grandes images
+        h, w = gray.shape[:2]
+        if max(h, w) > 800:
+            scale = 800 / max(h, w)
+            gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-    if not isinstance(faces, np.ndarray) or len(faces) == 0:
+        gray_eq = cv2.equalizeHist(gray)
+
+        faces = face_cascade.detectMultiScale(
+            gray_eq, scaleFactor=1.15, minNeighbors=5,
+            minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE
+        )
+
+        if not isinstance(faces, np.ndarray) or len(faces) == 0:
+            return 0, False
+
+        # Cherche des yeux dans au moins un visage
+        open_eyes = False
+        for (x, y, fw, fh) in faces:
+            roi = gray[y:y + fh, x:x + fw]
+            eyes = eye_cascade.detectMultiScale(roi, scaleFactor=1.15, minNeighbors=3, minSize=(10, 10))
+            if isinstance(eyes, np.ndarray) and len(eyes) >= 1:
+                open_eyes = True
+                break
+
+        return int(len(faces)), open_eyes
+
+    except Exception:
+        # OpenCV crash (assertion failed, etc.) — on skip la detection
         return 0, False
-
-    # Cherche des yeux dans au moins un visage
-    open_eyes = False
-    for (x, y, fw, fh) in faces:
-        roi = gray[y:y + fh, x:x + fw]
-        eyes = eye_cascade.detectMultiScale(roi, scaleFactor=1.1, minNeighbors=3, minSize=(15, 15))
-        if isinstance(eyes, np.ndarray) and len(eyes) >= 1:
-            open_eyes = True
-            break
-
-    return int(len(faces)), open_eyes
 
 
 def detect_context(exif_parsed: dict, exposure: dict) -> str:
@@ -344,44 +357,53 @@ def score_to_rating(score: float) -> int:
 def analyze_photo(path: Path, enable_faces: bool = True) -> Optional[PhotoAnalysis]:
     """
     Analyse complete d'une photo. Retourne None si le fichier ne peut pas etre lu.
+    Protege contre toutes les erreurs OpenCV / rawpy.
     """
     result = PhotoAnalysis(path=path)
 
-    # EXIF
-    tags = read_exif(path)
-    exif = parse_exif(tags)
-    result.datetime_taken = exif["datetime"]
-    result.iso = exif["iso"]
-    result.flash_fired = exif["flash_fired"]
-    result.color_temp_exif = exif["color_temp"]
+    try:
+        # EXIF
+        tags = read_exif(path)
+        exif = parse_exif(tags)
+        result.datetime_taken = exif["datetime"]
+        result.iso = exif["iso"]
+        result.flash_fired = exif["flash_fired"]
+        result.color_temp_exif = exif["color_temp"]
 
-    # Chargement image
-    img = load_preview(path)
-    if img is None:
-        return None
+        # Chargement image
+        img = load_preview(path)
+        if img is None:
+            return None
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Analyses
-    result.blur_score = compute_blur_score(gray)
-    exposure = compute_exposure(gray)
-    result.mean_brightness = exposure["mean"]
-    result.overexposed_ratio = exposure["overexposed"]
-    result.underexposed_ratio = exposure["underexposed"]
+        # Analyses
+        result.blur_score = compute_blur_score(gray)
+        exposure = compute_exposure(gray)
+        result.mean_brightness = exposure["mean"]
+        result.overexposed_ratio = exposure["overexposed"]
+        result.underexposed_ratio = exposure["underexposed"]
 
-    is_backlit = detect_backlit(img)
+        is_backlit = detect_backlit(img)
 
-    if enable_faces:
-        result.face_count, result.open_eyes = detect_faces(img)
+        if enable_faces:
+            result.face_count, result.open_eyes = detect_faces(img)
 
-    result.context = "backlit" if is_backlit else detect_context(exif, exposure)
+        result.context = "backlit" if is_backlit else detect_context(exif, exposure)
 
-    # Score et rating
-    result.score = compute_score(
-        result.blur_score, exposure,
-        result.face_count, result.open_eyes,
-        is_backlit, result.context
-    )
-    result.rating = score_to_rating(result.score)
+        # Score et rating
+        result.score = compute_score(
+            result.blur_score, exposure,
+            result.face_count, result.open_eyes,
+            is_backlit, result.context
+        )
+        result.rating = score_to_rating(result.score)
+
+    except Exception:
+        # En cas de crash OpenCV/rawpy, on retourne quand meme la photo
+        # avec un score par defaut (pas de rejet, pas de correction)
+        result.score = 50.0
+        result.rating = 2
+        result.context = "unknown"
 
     return result

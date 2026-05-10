@@ -71,26 +71,26 @@ def calculate_exposure_correction(mean_brightness: float, over: float, under: fl
     whites = 0
     blacks = 0
 
-    # Photo sous-exposee
-    if mean_brightness < 85:
-        # Correction d'exposition proportionnelle au sous-expose
-        exposure = _clamp((110 - mean_brightness) / 70.0, 0.0, 2.5)
-        shadows = _clamp(int((90 - mean_brightness) * 0.6), 0, 60)
-        blacks = _clamp(int((85 - mean_brightness) * 0.3), 0, 25)
+    # Photo sous-exposee — corrections conservatrices (point de depart, pas final)
+    if mean_brightness < 70:
+        # Seulement les vrais cas sombres
+        exposure = _clamp((100 - mean_brightness) / 120.0, 0.0, 1.2)
+        shadows = _clamp(int((80 - mean_brightness) * 0.3), 0, 30)
+        blacks = _clamp(int((70 - mean_brightness) * 0.15), 0, 10)
 
     # Photo sur-exposee
-    elif mean_brightness > 195:
-        exposure = _clamp(-(mean_brightness - 185) / 60.0, -2.0, 0.0)
-        highlights = _clamp(-int((mean_brightness - 180) * 1.0), -100, 0)
-        whites = _clamp(-int((mean_brightness - 190) * 0.6), -60, 0)
+    elif mean_brightness > 200:
+        exposure = _clamp(-(mean_brightness - 195) / 80.0, -1.5, 0.0)
+        highlights = _clamp(-int((mean_brightness - 190) * 0.7), -80, 0)
+        whites = _clamp(-int((mean_brightness - 200) * 0.4), -40, 0)
 
     # Pixels brules : reduire les hautes lumieres meme si la moyenne est bonne
-    if over > 0.03:
-        highlights = _clamp(highlights - int(over * 300), -100, 0)
+    if over > 0.05:
+        highlights = _clamp(highlights - int(over * 150), -80, 0)
 
-    # Pixels sous-noirs : pousser les noirs
-    if under > 0.05:
-        blacks = _clamp(blacks + int(under * 200), 0, 40)
+    # Pixels sous-noirs : pousser les noirs legerement
+    if under > 0.08:
+        blacks = _clamp(blacks + int(under * 80), 0, 15)
 
     return exposure, highlights, shadows, whites, blacks
 
@@ -157,37 +157,28 @@ def build_corrections(photo: PhotoAnalysis, auto_color: bool = True) -> Lightroo
     context = photo.context
 
     if context == "backlit":
-        # Recuperation agressive des hautes lumieres + lift des ombres
-        c.Highlights2012 = _clamp(c.Highlights2012 - 50, -100, 0)
-        c.Shadows2012    = _clamp(c.Shadows2012 + 45, 0, 100)
-        c.Whites2012     = _clamp(c.Whites2012 - 20, -100, 0)
-        c.Dehaze         = 10
+        # Recuperation douce
+        c.Highlights2012 = _clamp(c.Highlights2012 - 30, -70, 0)
+        c.Shadows2012    = _clamp(c.Shadows2012 + 20, 0, 50)
+        c.Whites2012     = _clamp(c.Whites2012 - 10, -40, 0)
 
     elif context == "low_light":
-        # Luminosite douce, pas trop de clarty pour eviter le bruit
-        c.Shadows2012 = _clamp(c.Shadows2012 + 30, 0, 80)
-        c.Blacks2012  = _clamp(c.Blacks2012 + 10, -100, 100)
-        c.Clarity2012 = 8
-
-    elif context == "indoor_flash":
-        # Flash : souvent un peu dur, on adoucit les hautes lumieres
-        c.Highlights2012 = _clamp(c.Highlights2012 - 25, -100, 0)
-        c.Contrast2012   = -5
-        c.ColorTint      = -5   # Reduire legerement le magenta du flash
-
-    elif context == "outdoor_bright":
-        # Soleil fort : recuperer les hautes lumieres, pousser les ombres
-        c.Highlights2012 = _clamp(c.Highlights2012 - 20, -100, 0)
-        c.Shadows2012    = _clamp(c.Shadows2012 + 10, 0, 100)
-        c.Vibrance       = 12
-
-    elif context == "outdoor_day":
-        c.Vibrance = 15
+        c.Shadows2012 = _clamp(c.Shadows2012 + 15, 0, 40)
         c.Clarity2012 = 5
 
+    elif context == "indoor_flash":
+        c.Highlights2012 = _clamp(c.Highlights2012 - 15, -50, 0)
+
+    elif context == "outdoor_bright":
+        c.Highlights2012 = _clamp(c.Highlights2012 - 15, -50, 0)
+        c.Vibrance       = 8
+
+    elif context == "outdoor_day":
+        c.Vibrance = 10
+
     elif context == "indoor_ambient":
-        c.Vibrance    = 10
-        c.Shadows2012 = _clamp(c.Shadows2012 + 15, 0, 100)
+        c.Vibrance    = 8
+        c.Shadows2012 = _clamp(c.Shadows2012 + 10, 0, 40)
 
     # --- Temperature couleur ---
     if auto_color:
