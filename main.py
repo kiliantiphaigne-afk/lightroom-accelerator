@@ -367,8 +367,8 @@ class App(tk.Tk):
         self._log.pack(fill="both", expand=True)
 
         # Barre de progression
-        prog_frame = tk.Frame(self, bg=BG_DARK, padx=16, pady=(0, 12))
-        prog_frame.pack(fill="x")
+        prog_frame = tk.Frame(self, bg=BG_DARK)
+        prog_frame.pack(fill="x", padx=16, pady=(0, 12))
 
         self._prog_var = tk.DoubleVar(value=0)
         self._progress = ttk.Progressbar(
