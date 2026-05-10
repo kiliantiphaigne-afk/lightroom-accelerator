@@ -25,9 +25,9 @@ from core.photo_analyzer import (
     analyze_photo, PhotoAnalysis, RAW_EXTENSIONS, JPEG_EXTENSIONS
 )
 from core.burst_detector import group_bursts, detect_duplicates
-from core.corrections import build_corrections
+from core.corrections import build_corrections, harmonize_white_balance
 from core.auto_crop import auto_crop
-from core.xmp_writer import write_xmp, write_report
+from core.xmp_writer import write_xmp, write_report, generate_keywords
 
 
 # ---------------------------------------------------------------------------
@@ -587,23 +587,51 @@ class App(tk.Tk):
                         pass
                 log(f"{n_cropped} photo(s) recadrée(s).", "ok")
 
-            # 7. Calcul des corrections et ecriture XMP
+            # 7. Calcul des corrections par photo
+            log("Calcul des corrections…", "dim")
+            progress(78, "Calcul des corrections…")
+
+            all_corrections = {}
+            for photo in analyzed:
+                c = build_corrections(photo, auto_color=params["auto_corrections"])
+                all_corrections[str(photo.path)] = c
+
+            # 8. Harmonisation balance des blancs par sequence
+            if params["auto_corrections"]:
+                log("Harmonisation balance des blancs par séquence…", "dim")
+                progress(82, "Harmonisation WB…")
+                harmonize_white_balance(analyzed, all_corrections, gap_seconds=30.0)
+                log("Balance des blancs harmonisée.", "ok")
+
+            # 9. Ecriture XMP (backup + keywords + corrections + crop)
             log("Écriture des fichiers XMP…", "dim")
-            progress(78, "Écriture des fichiers XMP…")
+            progress(85, "Écriture des fichiers XMP…")
 
             n_xmp = 0
             n_picks = 0
             n_rejects = 0
+            n_backups = 0
 
             for i, photo in enumerate(analyzed):
                 if not self._running:
                     break
 
-                corrections = build_corrections(
-                    photo, auto_color=params["auto_corrections"]
-                )
+                corrections = all_corrections.get(str(photo.path), build_corrections(photo))
                 crop = crop_data.get(photo.path)
-                write_xmp(photo, corrections, crop=crop, use_color_labels=params["color_labels"])
+                keywords = generate_keywords(photo)
+
+                # Backup de l'ancien XMP si existant
+                bak = photo.path.with_suffix(".xmp")
+                if bak.exists():
+                    n_backups += 1
+
+                write_xmp(
+                    photo, corrections,
+                    crop=crop,
+                    keywords=keywords,
+                    use_color_labels=params["color_labels"],
+                    do_backup=True,
+                )
                 n_xmp += 1
 
                 if photo.rating == -1:
@@ -611,10 +639,12 @@ class App(tk.Tk):
                 else:
                     n_picks += 1
 
-                pct = 78 + (i / len(analyzed)) * 17
+                pct = 85 + (i / len(analyzed)) * 12
                 progress(pct, f"XMP {i+1}/{len(analyzed)} — {photo.path.name}")
 
             log(f"{n_xmp} fichier(s) XMP écrit(s).", "ok")
+            if n_backups:
+                log(f"{n_backups} ancien(s) XMP sauvegardé(s) en .xmp.bak", "dim")
             results(picks=n_picks, rejects=n_rejects)
 
             # 7. Rapport CSV

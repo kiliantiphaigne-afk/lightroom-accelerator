@@ -5,7 +5,8 @@ l'analyse de chaque photo. Tout reste non-destructif.
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Dict
+from collections import defaultdict
 from .photo_analyzer import PhotoAnalysis
 
 
@@ -181,7 +182,68 @@ def build_corrections(photo: PhotoAnalysis, auto_color: bool = True) -> Lightroo
         c.Shadows2012 = _clamp(c.Shadows2012 + 10, 0, 40)
 
     # --- Temperature couleur ---
+    # (sera ecrasee par harmonize_white_balance si activee)
     if auto_color:
         c.ColorTemperature = calculate_color_temp(photo)
 
     return c
+
+
+def harmonize_white_balance(
+    photos: List[PhotoAnalysis],
+    corrections: Dict[str, LightroomCorrections],
+    gap_seconds: float = 30.0,
+) -> Dict[str, LightroomCorrections]:
+    """
+    Harmonise la balance des blancs par sequence temporelle.
+
+    Les photos prises dans un intervalle de gap_seconds secondes
+    recoivent la MEME temperature couleur (mediane du groupe).
+    Cela donne un look coherent pour des photos prises au meme endroit.
+
+    corrections : dict[photo.path.name] -> LightroomCorrections
+    Retourne le dict modifie in-place.
+    """
+    # Filtrer les photos avec datetime et qui ne sont pas rejetees
+    timed = [p for p in photos if p.datetime_taken is not None and p.rating != -1]
+    if not timed:
+        return corrections
+
+    timed.sort(key=lambda p: p.datetime_taken)
+
+    # Grouper par proximite temporelle
+    groups: List[List[PhotoAnalysis]] = []
+    current: List[PhotoAnalysis] = [timed[0]]
+
+    for photo in timed[1:]:
+        delta = (photo.datetime_taken - current[-1].datetime_taken).total_seconds()
+        if delta <= gap_seconds:
+            current.append(photo)
+        else:
+            groups.append(current)
+            current = [photo]
+    groups.append(current)
+
+    # Pour chaque groupe : mediane de la temperature couleur
+    for group in groups:
+        if len(group) < 2:
+            continue
+
+        temps = []
+        for p in group:
+            key = str(p.path)
+            if key in corrections and corrections[key].ColorTemperature is not None:
+                temps.append(corrections[key].ColorTemperature)
+
+        if not temps:
+            continue
+
+        median_temp = int(np.median(temps))
+
+        # Appliquer la mediane a tout le groupe
+        for p in group:
+            key = str(p.path)
+            if key in corrections:
+                corrections[key].ColorTemperature = median_temp
+
+    return corrections
