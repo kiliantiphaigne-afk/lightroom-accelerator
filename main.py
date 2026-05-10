@@ -26,6 +26,7 @@ from core.photo_analyzer import (
 )
 from core.burst_detector import group_bursts, detect_duplicates
 from core.corrections import build_corrections
+from core.auto_crop import auto_crop
 from core.xmp_writer import write_xmp, write_report
 
 
@@ -87,6 +88,7 @@ class SettingsPanel(tk.LabelFrame):
         self.enable_faces       = tk.BooleanVar(value=True)
         self.enable_duplicates  = tk.BooleanVar(value=True)
         self.auto_corrections   = tk.BooleanVar(value=True)
+        self.auto_crop          = tk.BooleanVar(value=True)
         self.color_labels       = tk.BooleanVar(value=True)
         self.generate_report    = tk.BooleanVar(value=True)
         self.max_workers        = tk.IntVar(value=4)
@@ -170,6 +172,7 @@ class SettingsPanel(tk.LabelFrame):
         chk("Détection des visages / yeux fermés", self.enable_faces, FG_MAIN)
         chk("Détecter les doublons (hash perceptuel)", self.enable_duplicates, FG_MAIN)
         chk("Appliquer corrections auto (exposition, couleur)", self.auto_corrections, GREEN)
+        chk("Recadrage automatique (visages + horizon)", self.auto_crop, GREEN)
         chk("Labels couleur par contexte (vert/bleu/violet...)", self.color_labels, FG_MAIN)
         chk("Générer rapport CSV", self.generate_report, FG_MAIN)
 
@@ -319,7 +322,7 @@ class App(tk.Tk):
         )
         self._browse_btn.pack(side="left")
 
-        self._recursive_var = tk.BooleanVar(value=False)
+        self._recursive_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             folder_frame, text="Sous-dossiers", variable=self._recursive_var,
             bg=BG_DARK, fg=FG_DIM, selectcolor=BG_INPUT,
@@ -419,6 +422,7 @@ class App(tk.Tk):
             "enable_faces": self._settings.enable_faces.get(),
             "enable_duplicates": self._settings.enable_duplicates.get(),
             "auto_corrections": self._settings.auto_corrections.get(),
+            "auto_crop": self._settings.auto_crop.get(),
             "color_labels": self._settings.color_labels.get(),
             "generate_report": self._settings.generate_report.get(),
             "max_workers": self._settings.max_workers.get(),
@@ -555,9 +559,37 @@ class App(tk.Tk):
             if n_blur_rejected:
                 log(f"{n_blur_rejected} photo(s) rejetée(s) pour flou (seuil={blur_thresh}).", "warn")
 
-            # 6. Calcul des corrections et ecriture XMP
+            # 6. Recadrage auto (chargement image necessaire)
+            n_cropped = 0
+            crop_data = {}  # path -> CropResult
+
+            if params["auto_crop"]:
+                log("Recadrage automatique…", "dim")
+                progress(72, "Recadrage automatique…")
+                from core.photo_analyzer import load_preview
+                for i, photo in enumerate(analyzed):
+                    if not self._running:
+                        break
+                    if photo.rating == -1:
+                        continue
+                    try:
+                        img = load_preview(photo.path)
+                        if img is not None:
+                            crop_result = auto_crop(
+                                img, photo.face_rects,
+                                enable_face_crop=True,
+                                enable_straighten=True,
+                            )
+                            if crop_result.has_crop:
+                                crop_data[photo.path] = crop_result
+                                n_cropped += 1
+                    except Exception:
+                        pass
+                log(f"{n_cropped} photo(s) recadrée(s).", "ok")
+
+            # 7. Calcul des corrections et ecriture XMP
             log("Écriture des fichiers XMP…", "dim")
-            progress(75, "Écriture des fichiers XMP…")
+            progress(78, "Écriture des fichiers XMP…")
 
             n_xmp = 0
             n_picks = 0
@@ -570,7 +602,8 @@ class App(tk.Tk):
                 corrections = build_corrections(
                     photo, auto_color=params["auto_corrections"]
                 )
-                write_xmp(photo, corrections, use_color_labels=params["color_labels"])
+                crop = crop_data.get(photo.path)
+                write_xmp(photo, corrections, crop=crop, use_color_labels=params["color_labels"])
                 n_xmp += 1
 
                 if photo.rating == -1:
@@ -578,7 +611,7 @@ class App(tk.Tk):
                 else:
                     n_picks += 1
 
-                pct = 75 + (i / len(analyzed)) * 20
+                pct = 78 + (i / len(analyzed)) * 17
                 progress(pct, f"XMP {i+1}/{len(analyzed)} — {photo.path.name}")
 
             log(f"{n_xmp} fichier(s) XMP écrit(s).", "ok")

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 from .photo_analyzer import PhotoAnalysis
 from .corrections import LightroomCorrections
+from .auto_crop import CropResult
 
 
 XMP_TEMPLATE = """\
@@ -53,6 +54,7 @@ def _color_label(photo: PhotoAnalysis) -> Optional[str]:
 def write_xmp(
     photo: PhotoAnalysis,
     corrections: LightroomCorrections,
+    crop: Optional[CropResult] = None,
     use_color_labels: bool = True,
 ) -> Path:
     """
@@ -75,6 +77,10 @@ def write_xmp(
 
     # Corrections camera raw
     attrs.update(corrections.to_xmp_attrs())
+
+    # Recadrage automatique
+    if crop is not None and crop.has_crop:
+        attrs.update(crop.to_xmp_attrs())
 
     # Formattage des attributs XMP (indentation 4 espaces)
     attr_lines = "\n".join(f'    {k}="{v}"' for k, v in attrs.items())

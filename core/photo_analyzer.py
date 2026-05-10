@@ -38,6 +38,7 @@ class PhotoAnalysis:
     overexposed_ratio: float = 0.0   # Fraction de pixels brules
     underexposed_ratio: float = 0.0  # Fraction de pixels noirs
     face_count: int = 0
+    face_rects: list = field(default_factory=list)  # [(x,y,w,h), ...] pour le crop
     open_eyes: bool = False
     context: str = "unknown"         # outdoor_day | indoor_flash | low_light | backlit | mixed
     score: float = 0.0               # 0-100, score final
@@ -219,10 +220,11 @@ def detect_backlit(img_bgr: np.ndarray) -> bool:
     return (border_mean - center_mean) > 50
 
 
-def detect_faces(img_bgr: np.ndarray) -> tuple[int, bool]:
+def detect_faces(img_bgr: np.ndarray) -> tuple[int, bool, list]:
     """
     Detection de visages et d'yeux ouverts.
-    Retourne (nb_visages, yeux_ouverts).
+    Retourne (nb_visages, yeux_ouverts, face_rects).
+    face_rects en coordonnees de l'image ORIGINALE (pas resized).
     Protege contre les crashes OpenCV sur certains RAW.
     """
     try:
@@ -231,6 +233,7 @@ def detect_faces(img_bgr: np.ndarray) -> tuple[int, bool]:
 
         # Resize pour eviter les crashes OpenCV sur les grandes images
         h, w = gray.shape[:2]
+        scale = 1.0
         if max(h, w) > 800:
             scale = 800 / max(h, w)
             gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
@@ -243,7 +246,15 @@ def detect_faces(img_bgr: np.ndarray) -> tuple[int, bool]:
         )
 
         if not isinstance(faces, np.ndarray) or len(faces) == 0:
-            return 0, False
+            return 0, False, []
+
+        # Remettre les coordonnees a l'echelle originale
+        inv_scale = 1.0 / scale
+        face_rects = [
+            (int(x * inv_scale), int(y * inv_scale),
+             int(fw * inv_scale), int(fh * inv_scale))
+            for (x, y, fw, fh) in faces
+        ]
 
         # Cherche des yeux dans au moins un visage
         open_eyes = False
@@ -254,11 +265,10 @@ def detect_faces(img_bgr: np.ndarray) -> tuple[int, bool]:
                 open_eyes = True
                 break
 
-        return int(len(faces)), open_eyes
+        return int(len(faces)), open_eyes, face_rects
 
     except Exception:
-        # OpenCV crash (assertion failed, etc.) — on skip la detection
-        return 0, False
+        return 0, False, []
 
 
 def detect_context(exif_parsed: dict, exposure: dict) -> str:
@@ -387,7 +397,7 @@ def analyze_photo(path: Path, enable_faces: bool = True) -> Optional[PhotoAnalys
         is_backlit = detect_backlit(img)
 
         if enable_faces:
-            result.face_count, result.open_eyes = detect_faces(img)
+            result.face_count, result.open_eyes, result.face_rects = detect_faces(img)
 
         result.context = "backlit" if is_backlit else detect_context(exif, exposure)
 
